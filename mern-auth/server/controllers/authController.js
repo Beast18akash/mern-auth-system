@@ -1,8 +1,11 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import { OAuth2Client } from "google-auth-library";
 import User from "../models/User.js";
 import sendEmail from "../utils/sendEmail.js";
+
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 export const getMe = async (req, res) => {
     try {
@@ -30,6 +33,13 @@ export const getMe = async (req, res) => {
 export const signup = async (req, res) => {
     try {
         const { fullname, email, password } = req.body;
+
+        if (!password || password.trim() === "") {
+            return res.status(400).json({
+                success: false,
+                message: "Password is required",
+            });
+        }
 
         const existingUser = await User.findOne({ email });
 
@@ -128,6 +138,14 @@ export const forgotPassword = async (req, res) => {
             return res.status(200).json({
                 success: true,
                 message: genericMessage,
+            });
+        }
+
+        // If the user registered via Google and has no local password
+        if (!user.password) {
+            return res.status(400).json({
+                success: false,
+                message: "This account uses Google Sign-In. Please sign in with Google.",
             });
         }
 
@@ -246,6 +264,92 @@ export const resetPassword = async (req, res) => {
         res.status(500).json({
             success: false,
             message: error.message,
+        });
+    }
+};
+
+export const googleLogin = async (req, res) => {
+    try {
+        const { idToken } = req.body;
+
+        if (!idToken) {
+            return res.status(400).json({
+                success: false,
+                message: "Google ID Token is required.",
+            });
+        }
+
+        // Verify Google ID Token
+        const ticket = await client.verifyIdToken({
+            idToken,
+            audience: process.env.GOOGLE_CLIENT_ID,
+        });
+
+        const payload = ticket.getPayload();
+        if (!payload) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid token payload.",
+            });
+        }
+
+        const { email, name, sub: googleId, picture } = payload;
+
+        if (!email) {
+            return res.status(400).json({
+                success: false,
+                message: "Email not provided by Google account.",
+            });
+        }
+
+        let user = await User.findOne({ email });
+
+        if (user) {
+            // Case 1: Email exists in DB. Check if googleId is set.
+            if (!user.googleId) {
+                // Account created via local login. Link Google account.
+                user.googleId = googleId;
+                if (picture && !user.profilePicture) {
+                    user.profilePicture = picture;
+                }
+                await user.save();
+            } else if (user.googleId !== googleId) {
+                // In case googleId needs update/sync
+                user.googleId = googleId;
+                await user.save();
+            }
+        } else {
+            // Case 2: Email does not exist. Create new Google OAuth user.
+            user = await User.create({
+                fullname: name,
+                email,
+                googleId,
+                profilePicture: picture,
+            });
+        }
+
+        // Generate application's JWT session token
+        const token = jwt.sign(
+            { id: user._id, email: user.email },
+            process.env.JWT_SECRET,
+            { expiresIn: "7d" }
+        );
+
+        res.status(200).json({
+            success: true,
+            message: "Signed in successfully",
+            token,
+            user: {
+                _id: user._id,
+                fullname: user.fullname,
+                email: user.email,
+                profilePicture: user.profilePicture,
+            },
+        });
+    } catch (error) {
+        res.status(401).json({
+            success: false,
+            message: "Google token verification failed: " + error.message,
         });
     }
 };

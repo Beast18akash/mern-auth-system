@@ -2,6 +2,7 @@ import { useState, type ChangeEvent, type FormEvent } from "react"
 import { Eye, EyeOff } from "lucide-react"
 import axios from "axios"
 import { Link, useNavigate } from "react-router-dom"
+import { GoogleLogin } from "@react-oauth/google"
 import {
   Card,
   CardHeader,
@@ -56,6 +57,37 @@ export const SignIn = () => {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleGoogleSuccess = async (credentialResponse: any) => {
+    setLoading(true)
+    setError("")
+    setSuccess("")
+
+    try {
+      const response = await axios.post(
+        "http://localhost:5000/api/auth/google",
+        { idToken: credentialResponse.credential }
+      )
+
+      document.cookie = `token=${response.data.token}; path=/; max-age=86400; SameSite=Lax`
+      setSuccess(response.data.message ?? "Signed in successfully!")
+      navigate("/dashboard")
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        setError(
+          err.response?.data?.message ?? "Google Sign-In failed. Please try again."
+        )
+      } else {
+        setError("Google Sign-In failed. Please try again.")
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleGoogleError = () => {
+    setError("Google Sign-In was unsuccessful. Please try again.")
   }
 
   return (
@@ -130,6 +162,20 @@ export const SignIn = () => {
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "Signing in..." : "Sign In"}
             </Button>
+            <div className="relative flex py-1 items-center">
+              <div className="flex-grow border-t border-border"></div>
+              <span className="flex-shrink mx-4 text-xs text-muted-foreground uppercase">Or</span>
+              <div className="flex-grow border-t border-border"></div>
+            </div>
+            <div className="flex justify-center w-full">
+              <GoogleLogin
+                onSuccess={handleGoogleSuccess}
+                onError={handleGoogleError}
+                useOneTap={false}
+                theme="outline"
+                size="large"
+              />
+            </div>
           </form>
         </CardContent>
         <CardFooter className="justify-center">
