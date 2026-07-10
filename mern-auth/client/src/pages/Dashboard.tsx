@@ -8,12 +8,9 @@ interface User {
   _id: string
   fullname: string
   email: string
+  profilePicture: string | null
+  providers: string[]
   createdAt: string
-}
-
-function getTokenFromCookie(): string | null {
-  const match = document.cookie.match(/(?:^|;\s*)token=([^;]+)/)
-  return match ? match[1] : null
 }
 
 export const Dashboard = () => {
@@ -21,19 +18,25 @@ export const Dashboard = () => {
   const [user, setUser] = useState<User | null>(null)
 
   useEffect(() => {
-    const token = getTokenFromCookie()
-    if (!token) return
-
+    // withCredentials: true sends the httpOnly cookie automatically.
+    // No need to read document.cookie — it can't see httpOnly cookies anyway.
     axios
       .get("http://localhost:5000/api/auth/me", {
-        headers: { Authorization: `Bearer ${token}` },
+        withCredentials: true,
       })
       .then((res) => setUser(res.data.user))
       .catch(() => navigate("/signin", { replace: true }))
   }, [navigate])
 
-  const handleSignOut = () => {
-    document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT"
+  const handleSignOut = async () => {
+    // Tell the server to clear the httpOnly cookie.
+    // Clearing it client-side via document.cookie won't work for httpOnly cookies.
+    await axios
+      .post("http://localhost:5000/api/auth/logout", {}, {
+        withCredentials: true,
+      })
+      .catch(() => {}) // ignore errors — navigate regardless
+
     navigate("/signin")
   }
 
@@ -47,11 +50,26 @@ export const Dashboard = () => {
             <CardTitle>Welcome, {user.fullname}!</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
+            {user.profilePicture && (
+              <img
+                src={user.profilePicture}
+                alt="Profile"
+                className="h-14 w-14 rounded-full object-cover"
+              />
+            )}
             <div className="flex flex-col gap-1">
               <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                 Email
               </span>
               <span className="text-sm">{user.email}</span>
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Signed in with
+              </span>
+              <span className="text-sm capitalize">
+                {user.providers?.join(", ") ?? "—"}
+              </span>
             </div>
             <div className="flex flex-col gap-1">
               <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">

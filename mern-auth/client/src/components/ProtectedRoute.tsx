@@ -2,11 +2,6 @@ import { useEffect, useState } from "react"
 import { Navigate } from "react-router-dom"
 import axios from "axios"
 
-function getTokenFromCookie(): string | null {
-  const match = document.cookie.match(/(?:^|;\s*)token=([^;]+)/)
-  return match ? match[1] : null
-}
-
 interface ProtectedRouteProps {
   children: React.ReactNode
 }
@@ -15,16 +10,17 @@ export const ProtectedRoute = ({ children }: ProtectedRouteProps) => {
   const [status, setStatus] = useState<"loading" | "authorized" | "unauthorized">("loading")
 
   useEffect(() => {
-    const token = getTokenFromCookie()
-
-    if (!token) {
-      setStatus("unauthorized")
-      return
-    }
-
+    // We no longer read the cookie with JS — httpOnly cookies are invisible to document.cookie.
+    // Instead we call /me with withCredentials: true. The browser automatically attaches
+    // the httpOnly cookie to the request. If the server returns 200 the user is authenticated,
+    // if it returns 401 they are not.
+    //
+    // This works for ALL auth flows:
+    //   - Local / Google  → token was set in the cookie by the server on signin
+    //   - GitHub          → token was set in the cookie by the server after the OAuth callback
     axios
       .get("http://localhost:5000/api/auth/me", {
-        headers: { Authorization: `Bearer ${token}` },
+        withCredentials: true, // sends the httpOnly cookie automatically
       })
       .then(() => setStatus("authorized"))
       .catch(() => setStatus("unauthorized"))

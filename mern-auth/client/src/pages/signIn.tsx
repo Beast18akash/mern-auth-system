@@ -1,7 +1,7 @@
-import { useState, type ChangeEvent, type FormEvent } from "react"
+import { useState, useEffect, type ChangeEvent, type FormEvent } from "react"
 import { Eye, EyeOff } from "lucide-react"
 import axios from "axios"
-import { Link, useNavigate } from "react-router-dom"
+import { Link, useNavigate, useSearchParams } from "react-router-dom"
 import { GoogleLogin } from "@react-oauth/google"
 import {
   Card,
@@ -16,14 +16,31 @@ import { Button } from "@/components/ui/button"
 
 export const SignIn = () => {
   const navigate = useNavigate()
-  const [credentials, setCredentials] = useState({
-    email: "",
-    password: "",
-  })
+  const [searchParams] = useSearchParams()
+
+  const [credentials, setCredentials] = useState({ email: "", password: "" })
   const [showPassword, setShowPassword] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
   const [success, setSuccess] = useState("")
+
+  // Show a friendly message when GitHub redirects back with ?error=
+  useEffect(() => {
+    const oauthError = searchParams.get("error")
+    if (!oauthError) return
+
+    const errorMessages: Record<string, string> = {
+      github_auth_cancelled: "GitHub sign-in was cancelled.",
+      github_auth_failed: "GitHub sign-in failed. Please try again.",
+      github_redirect_failed: "Could not connect to GitHub. Please try again.",
+      invalid_state: "Invalid OAuth state. Please try again.",
+      no_code: "No authorization code received from GitHub.",
+    }
+
+    setError(
+      errorMessages[oauthError] ?? "Authentication failed. Please try again."
+    )
+  }, [searchParams])
 
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target
@@ -41,7 +58,6 @@ export const SignIn = () => {
         "http://localhost:5000/api/auth/signin",
         credentials
       )
-
       document.cookie = `token=${response.data.token}; path=/; max-age=86400; SameSite=Lax`
       setSuccess(response.data.message ?? "Signed in successfully!")
       setCredentials({ email: "", password: "" })
@@ -69,7 +85,6 @@ export const SignIn = () => {
         "http://localhost:5000/api/auth/google",
         { idToken: credentialResponse.credential }
       )
-
       document.cookie = `token=${response.data.token}; path=/; max-age=86400; SameSite=Lax`
       setSuccess(response.data.message ?? "Signed in successfully!")
       navigate("/dashboard")
@@ -90,6 +105,10 @@ export const SignIn = () => {
     setError("Google Sign-In was unsuccessful. Please try again.")
   }
 
+  const handleGitHubLogin = () => {
+    window.location.href = "http://localhost:5000/api/auth/github"
+  }
+
   return (
     <div className="flex min-h-svh w-full flex-1 items-center justify-center p-6">
       <Card className="w-full max-w-md text-left">
@@ -99,6 +118,8 @@ export const SignIn = () => {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+
+            {/* Email */}
             <div className="flex flex-col gap-2">
               <label htmlFor="email" className="text-sm font-medium">
                 Email
@@ -113,6 +134,8 @@ export const SignIn = () => {
                 required
               />
             </div>
+
+            {/* Password */}
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between">
                 <label htmlFor="password" className="text-sm font-medium">
@@ -146,27 +169,34 @@ export const SignIn = () => {
                 </button>
               </div>
             </div>
+
+            {/* Messages */}
             {error && (
               <p className="text-sm text-destructive" role="alert">
                 {error}
               </p>
             )}
             {success && (
-              <p
-                className="text-sm text-green-600 dark:text-green-400"
-                role="status"
-              >
+              <p className="text-sm text-green-600 dark:text-green-400" role="status">
                 {success}
               </p>
             )}
+
+            {/* Submit */}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "Signing in..." : "Sign In"}
             </Button>
-            <div className="relative flex py-1 items-center">
-              <div className="flex-grow border-t border-border"></div>
-              <span className="flex-shrink mx-4 text-xs text-muted-foreground uppercase">Or</span>
-              <div className="flex-grow border-t border-border"></div>
+
+            {/* Divider */}
+            <div className="relative flex items-center py-1">
+              <div className="flex-grow border-t border-border" />
+              <span className="mx-4 flex-shrink text-xs uppercase text-muted-foreground">
+                Or
+              </span>
+              <div className="flex-grow border-t border-border" />
             </div>
+
+            {/* Google */}
             <div className="flex justify-center w-full">
               <GoogleLogin
                 onSuccess={handleGoogleSuccess}
@@ -176,6 +206,26 @@ export const SignIn = () => {
                 size="large"
               />
             </div>
+
+            {/* GitHub */}
+            <button
+              type="button"
+              onClick={handleGitHubLogin}
+              className="flex w-full items-center justify-center gap-2 rounded-md border border-border bg-background px-4 py-2 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.385-1.335-1.755-1.335-1.755-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23A11.52 11.52 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.29-1.552 3.297-1.23 3.297-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12z" />
+              </svg>
+              Continue with GitHub
+            </button>
+
           </form>
         </CardContent>
         <CardFooter className="justify-center">

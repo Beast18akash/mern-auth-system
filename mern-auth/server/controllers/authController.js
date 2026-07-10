@@ -1,15 +1,164 @@
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import crypto from "crypto";
-import { OAuth2Client } from "google-auth-library";
+
 import User from "../models/User.js";
-import sendEmail from "../utils/sendEmail.js";
+import { generateToken } from "../utils/jwt.js";
+import { setAuthCookie } from "../utils/cookie.js";
+import { sendEmail } from "../utils/sendEmail.js";
+import { handleGoogleLogin } from "../providers/googleProvider.js";
+import { getGitHubAuthUrl, handleGitHubCallback } from "../providers/githubProvider.js";
 
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+// ---------------------------------------------------------------------------
+// Local Authentication
+// ---------------------------------------------------------------------------
 
+/**
+ * POST /api/auth/signup
+ *
+ * Registers a new user with email and password (local auth).
+ * Adds a "local" entry to the providers array so the system
+ * knows this account has local authentication enabled.
+ */
+export const signup = async (req, res) => {
+    try {
+        const { fullname, email, password } = req.body;
+
+        if (!fullname || !email || !password) {
+            return res.status(400).json({
+                success: false,
+                message: "Full name, email, and password are required.",
+            });
+        }
+
+        if (password.trim().length < 6) {
+            return res.status(400).json({
+                success: false,
+                message: "Password must be at least 6 characters.",
+            });
+        }
+
+        const normalizedEmail = email.toLowerCase().trim();
+        const existingUser = await User.findOne({ email: normalizedEmail });
+
+        if (existingUser) {
+            return res.status(400).json({
+                success: false,
+                message: "An account with this email already exists.",
+            });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        const user = await User.create({
+            fullname,
+            email: normalizedEmail,
+            password: hashedPassword,
+            // Mark local as a linked provider so forgotPassword and
+            // other checks can query providers[] consistently
+            providers: [
+                {
+                    provider: "local",
+                    providerId: null,
+                    linkedAt: new Date(),
+                },
+            ],
+        });
+
+        res.status(201).json({
+            success: true,
+            message: "Account created successfully.",
+            user: {
+                _id: user._id,
+                fullname: user.fullname,
+                email: user.email,
+            },
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message,
+        });
+    }
+};
+
+/**
+ * POST /api/auth/signin
+ *
+ * Authenticates a user with email and password.
+ * Generates a JWT and sets it in an HTTP-only cookie.
+ * Also returns the token in the response body for the existing
+ * frontend that still sets the cookie client-side.
+ */
+export const signin = async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({
+                success: false,
+                message: "Email and password are required.",
+            });
+        }
+
+        const normalizedEmail = email.toLowerCase().trim();
+        const user = await User.findOne({ email: normalizedEmail });
+
+        if (!user || !user.password) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid email or password.",
+            });
+        }
+
+        const isMatch = await bcrypt.compare(password, user.password);
+
+        if (!isMatch) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid email or password.",
+            });
+        }
+
+        const token = generateToken(user._id, user.email);
+
+        // Set the cookie server-side (used by GitHub redirect flow
+        // and future requests once the frontend is fully migrated)
+        setAuthCookie(res, token);
+
+        res.status(200).json({
+            success: true,
+            message: "Signed in successfully.",
+            // Still returning token in body for the existing frontend
+            // that reads it via response.data.token and sets the cookie
+            // client-side. Both the cookie and the body token are identical.
+            token,
+            user: {
+                _id: user._id,
+                fullname: user.fullname,
+                email: user.email,
+                profilePicture: user.profilePicture,
+                providers: user.providers.map((p) => p.provider),
+            },
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message,
+        });
+    }
+};
+
+/**
+ * GET /api/auth/me
+ *
+ * Returns the authenticated user's profile.
+ * Protected by the protect middleware — req.user is always set here.
+ */
 export const getMe = async (req, res) => {
     try {
-        const user = await User.findById(req.user.id).select("-password");
+        const user = await User.findById(req.user.id).select(
+            "-password -resetPasswordToken -resetPasswordExpires"
+        );
 
         if (!user) {
             return res.status(404).json({
@@ -30,85 +179,23 @@ export const getMe = async (req, res) => {
     }
 };
 
-export const signup = async (req, res) => {
+/**
+ * POST /api/auth/logout
+ *
+ * Clears the HTTP-only auth cookie.
+ */
+export const logout = async (req, res) => {
     try {
-        const { fullname, email, password } = req.body;
-
-        if (!password || password.trim() === "") {
-            return res.status(400).json({
-                success: false,
-                message: "Password is required",
-            });
-        }
-
-        const existingUser = await User.findOne({ email });
-
-        if (existingUser) {
-            return res.status(400).json({
-                success: false,
-                message: "User already exists",
-            });
-        }
-
-        const hashedPassword = await bcrypt.hash(password, 10);
-
-        const user = await User.create({
-            fullname,
-            email,
-            password: hashedPassword,
+        res.clearCookie("token", {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            path: "/",
         });
-
-        res.status(201).json({
-            success: true,
-            message: "User registered successfully",
-            user,
-        });
-        
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: error.message,
-        });
-    }
-};
-
-export const signin = async (req, res) => {
-    try {
-        const { email, password } = req.body;
-
-        const user = await User.findOne({ email });
-
-        if (!user) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid email or password",
-            });
-        }
-
-        const isMatch = await bcrypt.compare(password, user.password);
-
-        if (!isMatch) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid email or password",
-            });
-        }
-
-        const token = jwt.sign(
-            { id: user._id, email: user.email },
-            process.env.JWT_SECRET,
-            { expiresIn: "7d" }
-        );
 
         res.status(200).json({
             success: true,
-            message: "Signed in successfully",
-            token,
-            user: {
-                _id: user._id,
-                fullname: user.fullname,
-                email: user.email,
-            },
+            message: "Logged out successfully.",
         });
     } catch (error) {
         res.status(500).json({
@@ -118,6 +205,18 @@ export const signin = async (req, res) => {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Forgot / Reset Password
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/auth/forgot-password
+ *
+ * Sends a password reset email.
+ * Only works when local authentication is enabled on the account.
+ * If the user signed up via Google or GitHub only, they have no password
+ * to reset — we return a clear message instead of silently doing nothing.
+ */
 export const forgotPassword = async (req, res) => {
     try {
         const { email } = req.body;
@@ -129,44 +228,45 @@ export const forgotPassword = async (req, res) => {
             });
         }
 
-        const user = await User.findOne({ email });
+        const normalizedEmail = email.toLowerCase().trim();
+        const user = await User.findOne({ email: normalizedEmail });
 
-        const genericMessage = "If an account with that email exists, a password reset link has been sent.";
+        // Generic message — never reveal whether an email exists in the system
+        const genericMessage =
+            "If an account with that email exists, a password reset link has been sent.";
 
         if (!user) {
-            // Do not reveal that the email does not exist
-            return res.status(200).json({
-                success: true,
-                message: genericMessage,
-            });
+            return res.status(200).json({ success: true, message: genericMessage });
         }
 
-        // If the user registered via Google and has no local password
-        if (!user.password) {
+        // Use our schema method to check if local auth is enabled
+        // Previously this was: if (!user.password)
+        // Now it's clean and reads exactly like the business rule
+        if (!user.hasProvider("local")) {
             return res.status(400).json({
                 success: false,
-                message: "This account uses Google Sign-In. Please sign in with Google.",
+                message:
+                    "This account uses social login (Google or GitHub). " +
+                    "Password reset is only available for accounts with a password.",
             });
         }
 
-        // Generate secure random reset token
+        // Generate a secure random reset token
         const resetToken = crypto.randomBytes(32).toString("hex");
 
-        // Hash the token and save it to database
+        // Hash it before storing — never store raw tokens in the database
         const hashedToken = crypto
             .createHash("sha256")
             .update(resetToken)
             .digest("hex");
 
         user.resetPasswordToken = hashedToken;
-        user.resetPasswordExpires = Date.now() + 15 * 60 * 1000; // 15 minutes expiry
+        user.resetPasswordExpires = Date.now() + 15 * 60 * 1000; // 15 minutes
 
         await user.save();
 
-        // Create reset link URL
-        const resetUrl = `${process.env.CLIENT_URL || "http://localhost:5173"}/reset-password/${resetToken}`;
+        const resetUrl = `${process.env.CLIENT_URL}/reset-password/${resetToken}`;
 
-        // Prepare email HTML and text contents
         const emailHtml = `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
                 <h2 style="color: #333333; text-align: center;">Reset Your Password</h2>
@@ -182,27 +282,23 @@ export const forgotPassword = async (req, res) => {
             </div>
         `;
 
-        const emailText = `You have requested a password reset. Please click or open the following link to choose a new password: ${resetUrl}. This link is valid for 15 minutes.`;
-
         try {
             await sendEmail({
                 to: user.email,
                 subject: "Password Reset Request",
                 html: emailHtml,
-                text: emailText,
+                text: `Reset your password here: ${resetUrl} — valid for 15 minutes.`,
             });
 
-            res.status(200).json({
-                success: true,
-                message: genericMessage,
-            });
+            res.status(200).json({ success: true, message: genericMessage });
         } catch (mailError) {
-            // Revert token database updates if sending email fails
-            user.resetPasswordToken = undefined;
-            user.resetPasswordExpires = undefined;
+            // Roll back the token if the email fails — don't leave a dangling token
+            user.resetPasswordToken = null;
+            user.resetPasswordExpires = null;
             await user.save();
 
             console.error("Email sending failed:", mailError);
+
             res.status(500).json({
                 success: false,
                 message: "Email could not be sent. Please try again later.",
@@ -216,6 +312,11 @@ export const forgotPassword = async (req, res) => {
     }
 };
 
+/**
+ * POST /api/auth/reset-password/:token
+ *
+ * Resets the user's password using the token from the email link.
+ */
 export const resetPassword = async (req, res) => {
     try {
         const { token } = req.params;
@@ -228,7 +329,14 @@ export const resetPassword = async (req, res) => {
             });
         }
 
-        // Hash token from param to compare with the one stored in database
+        if (password.trim().length < 6) {
+            return res.status(400).json({
+                success: false,
+                message: "Password must be at least 6 characters.",
+            });
+        }
+
+        // Hash the token from the URL to compare against the stored hash
         const hashedToken = crypto
             .createHash("sha256")
             .update(token)
@@ -246,19 +354,19 @@ export const resetPassword = async (req, res) => {
             });
         }
 
-        // Hash new password using bcryptjs
-        const hashedPassword = await bcrypt.hash(password, 10);
+        user.password = await bcrypt.hash(password, 10);
+        user.resetPasswordToken = null;
+        user.resetPasswordExpires = null;
 
-        // Update password and invalidate reset token fields
-        user.password = hashedPassword;
-        user.resetPasswordToken = undefined;
-        user.resetPasswordExpires = undefined;
+        // If this user previously only had social login and is now setting
+        // a password for the first time, enable local auth for their account
+        user.linkProvider("local", null);
 
         await user.save();
 
         res.status(200).json({
             success: true,
-            message: "Password has been reset successfully. You can now log in.",
+            message: "Password has been reset successfully. You can now sign in.",
         });
     } catch (error) {
         res.status(500).json({
@@ -268,88 +376,155 @@ export const resetPassword = async (req, res) => {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Google OAuth
+// ---------------------------------------------------------------------------
+
+/**
+ * POST /api/auth/google
+ *
+ * Receives the Google ID Token from the frontend (@react-oauth/google),
+ * verifies it, finds or creates the user, and issues a session.
+ *
+ * The frontend flow does NOT change — it still sends { idToken } in the
+ * request body and reads the token from the JSON response.
+ */
 export const googleLogin = async (req, res) => {
     try {
         const { idToken } = req.body;
 
-        if (!idToken) {
-            return res.status(400).json({
-                success: false,
-                message: "Google ID Token is required.",
-            });
-        }
+        // Delegate all Google-specific logic to the provider
+        const user = await handleGoogleLogin(idToken);
 
-        // Verify Google ID Token
-        const ticket = await client.verifyIdToken({
-            idToken,
-            audience: process.env.GOOGLE_CLIENT_ID,
-        });
+        const token = generateToken(user._id, user.email);
 
-        const payload = ticket.getPayload();
-        if (!payload) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid token payload.",
-            });
-        }
-
-        const { email, name, sub: googleId, picture } = payload;
-
-        if (!email) {
-            return res.status(400).json({
-                success: false,
-                message: "Email not provided by Google account.",
-            });
-        }
-
-        let user = await User.findOne({ email });
-
-        if (user) {
-            // Case 1: Email exists in DB. Check if googleId is set.
-            if (!user.googleId) {
-                // Account created via local login. Link Google account.
-                user.googleId = googleId;
-                if (picture && !user.profilePicture) {
-                    user.profilePicture = picture;
-                }
-                await user.save();
-            } else if (user.googleId !== googleId) {
-                // In case googleId needs update/sync
-                user.googleId = googleId;
-                await user.save();
-            }
-        } else {
-            // Case 2: Email does not exist. Create new Google OAuth user.
-            user = await User.create({
-                fullname: name,
-                email,
-                googleId,
-                profilePicture: picture,
-            });
-        }
-
-        // Generate application's JWT session token
-        const token = jwt.sign(
-            { id: user._id, email: user.email },
-            process.env.JWT_SECRET,
-            { expiresIn: "7d" }
-        );
+        // Set server-side cookie (consistent with GitHub flow)
+        setAuthCookie(res, token);
 
         res.status(200).json({
             success: true,
-            message: "Signed in successfully",
-            token,
+            message: "Signed in with Google successfully.",
+            token, // Still returned in body for existing frontend
             user: {
                 _id: user._id,
                 fullname: user.fullname,
                 email: user.email,
                 profilePicture: user.profilePicture,
+                providers: user.providers.map((p) => p.provider),
             },
         });
     } catch (error) {
         res.status(401).json({
             success: false,
-            message: "Google token verification failed: " + error.message,
+            message: error.message ?? "Google authentication failed.",
         });
     }
-};
+};
+
+// ---------------------------------------------------------------------------
+// GitHub OAuth
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/auth/github
+ *
+ * Entry point for the GitHub OAuth flow.
+ *
+ * Generates a random state token for CSRF protection, stores it in a
+ * short-lived cookie, then redirects the browser to GitHub's authorization page.
+ *
+ * The state cookie is httpOnly and has a 10-minute expiry — just long
+ * enough for the user to complete the GitHub consent screen.
+ */
+export const githubRedirect = (req, res) => {
+    try {
+        // Generate a random state value for CSRF protection
+        const state = crypto.randomBytes(16).toString("hex");
+
+        // Store it in a short-lived httpOnly cookie so we can verify it
+        // when GitHub sends the user back to the callback
+        res.cookie("github_oauth_state", state, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            maxAge: 10 * 60 * 1000, // 10 minutes
+        });
+
+        const authUrl = getGitHubAuthUrl(state);
+
+        res.redirect(authUrl);
+    } catch (error) {
+        res.redirect(
+            `${process.env.CLIENT_URL}/signin?error=github_redirect_failed`
+        );
+    }
+};
+
+/**
+ * GET /api/auth/github/callback
+ *
+ * GitHub redirects the user here after they authenticate and grant permission.
+ *
+ * URL will look like:
+ *   /api/auth/github/callback?code=XXXXXX&state=YYYYYY
+ *
+ * Steps:
+ *   1. Validate the state parameter (CSRF check)
+ *   2. Check for OAuth cancellation or errors from GitHub
+ *   3. Exchange the code for an access token
+ *   4. Fetch the GitHub profile
+ *   5. Find or create the user
+ *   6. Generate JWT, set cookie
+ *   7. Redirect to the frontend dashboard
+ */
+export const githubCallback = async (req, res) => {
+    try {
+        const { code, state, error: oauthError } = req.query;
+
+        // --- Step 1: CSRF state validation ---
+        const storedState = req.cookies?.github_oauth_state;
+
+        if (!storedState || storedState !== state) {
+            return res.redirect(
+                `${process.env.CLIENT_URL}/signin?error=invalid_state`
+            );
+        }
+
+        // Clear the state cookie — it's single-use
+        res.clearCookie("github_oauth_state");
+
+        // --- Step 2: Handle OAuth errors (e.g. user clicked "Cancel") ---
+        if (oauthError) {
+            return res.redirect(
+                `${process.env.CLIENT_URL}/signin?error=github_auth_cancelled`
+            );
+        }
+
+        if (!code) {
+            return res.redirect(
+                `${process.env.CLIENT_URL}/signin?error=no_code`
+            );
+        }
+
+        // --- Steps 3–5: Handled inside the provider ---
+        const user = await handleGitHubCallback(code);
+
+        // --- Step 6: Issue our own JWT session token ---
+        const token = generateToken(user._id, user.email);
+
+        // Set in an HTTP-only cookie — the ONLY way to persist the session
+        // after a redirect flow (there is no JSON response the frontend can read)
+        setAuthCookie(res, token);
+
+        // --- Step 7: Redirect back to the frontend ---
+        // The frontend dashboard reads the user from GET /api/auth/me using the cookie.
+        // No token is passed in the URL — that would expose it in browser history and logs.
+        res.redirect(`${process.env.CLIENT_URL}/dashboard`);
+    } catch (error) {
+        console.error("GitHub callback error:", error.message);
+
+        res.redirect(
+            `${process.env.CLIENT_URL}/signin?error=github_auth_failed`
+        );
+    }
+};
